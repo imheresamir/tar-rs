@@ -20,7 +20,7 @@ use crate::EntryType;
 ///
 /// This value, chosen after careful deliberation, corresponds to _Jul 23, 2006_,
 /// which is the date of the first commit for what would become Rust.
-#[cfg(all(any(unix, windows), not(target_arch = "wasm32")))]
+#[cfg(all(any(unix, windows, target_os = "hermit"), not(target_arch = "wasm32")))]
 pub const DETERMINISTIC_TIMESTAMP: u64 = 1153704088;
 
 pub(crate) const BLOCK_SIZE: u64 = 512;
@@ -783,6 +783,57 @@ impl Header {
     #[allow(unused_variables)]
     fn fill_platform_from(&mut self, meta: &fs::Metadata, mode: HeaderMode) {
         unimplemented!();
+    }
+
+
+    #[cfg(target_os = "hermit")]
+    fn fill_platform_from(&mut self, meta: &fs::Metadata, mode: HeaderMode) {
+        // Hermit is building toward full Linux compatibility. This implementation
+        // uses cross-platform std APIs. As the Hermit kernel gains POSIX metadata
+        // support (mode, uid, gid via virtio-fs/virtio-blk), replace the defaults
+        // with real syscall results.
+        use std::time::UNIX_EPOCH;
+
+        match mode {
+            HeaderMode::Complete => {
+                // Cross-platform mtime via SystemTime
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.set_mtime(mtime);
+                // TODO: replace with Hermit kernel uid/gid syscalls when available
+                self.set_uid(0);
+                self.set_gid(0);
+                // Best-effort mode from metadata; falls back to sensible defaults
+                let fs_mode = if meta.is_dir() {
+                    0o755
+                } else {
+                    0o644
+                };
+                self.set_mode(fs_mode);
+            }
+            HeaderMode::Deterministic => {
+                self.set_mtime(DETERMINISTIC_TIMESTAMP);
+                self.set_uid(0);
+                self.set_gid(0);
+                let fs_mode = if meta.is_dir() { 0o755 } else { 0o644 };
+                self.set_mode(fs_mode);
+            }
+        }
+
+        // Entry type via cross-platform metadata APIs
+        self.set_entry_type(if meta.is_dir() {
+            EntryType::dir()
+        } else if meta.is_file() {
+            EntryType::file()
+        } else if meta.is_symlink() {
+            EntryType::symlink()
+        } else {
+            EntryType::new(b' ')
+        });
     }
 
     #[cfg(all(unix, not(target_arch = "wasm32")))]
@@ -1670,7 +1721,7 @@ fn copy_path_into_gnu_long(
     copy_path_into_inner(slot, path, is_link_name, true, allow_absolute)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "hermit"))]
 fn ends_with_slash(p: &Path) -> bool {
     p.to_string_lossy().ends_with('/')
 }
@@ -1686,7 +1737,7 @@ fn ends_with_slash(p: &Path) -> bool {
     p.as_os_str().as_bytes().ends_with(b"/")
 }
 
-#[cfg(any(windows, target_arch = "wasm32"))]
+#[cfg(any(windows, target_arch = "wasm32", target_os = "hermit"))]
 pub fn path2bytes(p: &Path) -> io::Result<Cow<'_, [u8]>> {
     p.as_os_str()
         .to_str()
@@ -1748,7 +1799,7 @@ pub fn bytes2path(bytes: Cow<[u8]>) -> io::Result<Cow<Path>> {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "hermit"))]
 pub fn bytes2path(bytes: Cow<[u8]>) -> io::Result<Cow<Path>> {
     Ok(match bytes {
         Cow::Borrowed(bytes) => {
@@ -1760,7 +1811,7 @@ pub fn bytes2path(bytes: Cow<[u8]>) -> io::Result<Cow<Path>> {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "hermit"))]
 fn invalid_utf8<T>(_: T) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Invalid utf-8")
 }

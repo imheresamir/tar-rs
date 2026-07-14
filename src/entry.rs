@@ -599,6 +599,17 @@ impl<'a> EntryFields<'a> {
                 Err(io::Error::new(io::ErrorKind::Other, "Not implemented"))
             }
 
+            #[cfg(target_os = "hermit")]
+            #[allow(unused_variables)]
+            fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
+                // Hermit kernel symlink support is planned as part of
+                // Linux-compatible VFS (virtio-fs/virtio-blk).
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "symlink not yet supported on Hermit (kernel VFS in progress)",
+                ))
+            }
+
             #[cfg(windows)]
             fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
                 ::std::os::windows::fs::symlink_file(src, dst)
@@ -770,8 +781,9 @@ impl<'a> EntryFields<'a> {
             }
         }
 
-        // Windows does not support posix numeric ownership IDs
-        #[cfg(any(windows, target_arch = "wasm32"))]
+        // Windows and wasm32 do not support posix numeric ownership IDs.
+        // Hermit: single-user unikernel; uid/gid are always 0.
+        #[cfg(any(windows, target_arch = "wasm32", target_os = "hermit"))]
         fn _set_ownerships(
             _: &Path,
             _: &Option<&mut std::fs::File>,
@@ -857,6 +869,39 @@ impl<'a> EntryFields<'a> {
             Err(io::Error::new(io::ErrorKind::Other, "Not implemented"))
         }
 
+        #[cfg(target_os = "hermit")]
+        fn _set_perms(
+            dst: &Path,
+            f: Option<&mut std::fs::File>,
+            mode: u32,
+            mask: u32,
+            preserve: bool,
+        ) -> io::Result<()> {
+            // Hermit is building toward full Linux compat. Use cross-platform
+            // std::fs::Permissions where possible. As the kernel gains
+            // POSIX chmod support via virtio-fs/virtio-blk, this can be
+            // upgraded to use mode bits directly.
+            let mode = if preserve { mode } else { mode & 0o777 };
+            let _mode = mode & !mask;
+
+            // Best-effort: use the cross-platform readonly flag.
+            // Full POSIX mode bit support requires std::os::hermit::fs::PermissionsExt
+            // or direct syscall access.
+            let read_only = (_mode & 0o200) == 0;
+            match f {
+                Some(f) => {
+                    let mut perm = f.metadata()?.permissions();
+                    perm.set_readonly(read_only);
+                    f.set_permissions(perm)
+                }
+                None => {
+                    let mut perm = fs::metadata(dst)?.permissions();
+                    perm.set_readonly(read_only);
+                    fs::set_permissions(dst, perm)
+                }
+            }
+        }
+
         #[cfg(all(unix, not(target_arch = "wasm32"), feature = "xattr"))]
         fn set_xattrs(me: &mut EntryFields, dst: &Path) -> io::Result<()> {
             use std::ffi::OsStr;
@@ -895,7 +940,7 @@ impl<'a> EntryFields<'a> {
         }
         // Windows does not completely support posix xattrs
         // https://en.wikipedia.org/wiki/Extended_file_attributes#Windows_NT
-        #[cfg(any(windows, not(feature = "xattr"), target_arch = "wasm32"))]
+        #[cfg(any(windows, not(feature = "xattr"), target_arch = "wasm32", target_os = "hermit"))]
         fn set_xattrs(_: &mut EntryFields, _: &Path) -> io::Result<()> {
             Ok(())
         }
